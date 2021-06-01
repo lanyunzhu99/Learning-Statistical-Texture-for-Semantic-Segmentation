@@ -37,6 +37,8 @@ class ConvBNReLU(nn.Module):
             x = self.relu(x)
         return x
 
+
+
 class QCO_1d(nn.Module):
     def __init__(self, level_num):
         super(QCO_1d, self).__init__()
@@ -46,52 +48,40 @@ class QCO_1d(nn.Module):
         self.f2 = ConvBNReLU(64, 128, 1, 1, 0, has_bn=False, mode='1d')
         self.out = ConvBNReLU(256, 128, 1, 1, 0, has_bn=True, mode='1d')
         self.level_num = level_num
+
     def forward(self, x):
         x = self.conv1(x)
         x = self.conv2(x)
         N, C, H, W = x.shape
-
-        x_ave = F.adaptive_avg_pool2d(x, (1, 1)) #[N, 128, 1, 1]
-        cos_sim = (F.normalize(x_ave, dim=1) * F.normalize(x, dim=1)).sum(1) #[N, H, W]
-        cos_sim = cos_sim.view(N, -1) #[N, HW]
-
-        cos_sim_min, _ = cos_sim.min(-1) #[N]
-        cos_sim_min = cos_sim_min.unsqueeze(-1) #[N, 1]
+        x_ave = F.adaptive_avg_pool2d(x, (1, 1)) 
+        cos_sim = (F.normalize(x_ave, dim=1) * F.normalize(x, dim=1)).sum(1) 
+        cos_sim = cos_sim.view(N, -1) 
+        cos_sim_min, _ = cos_sim.min(-1) 
+        cos_sim_min = cos_sim_min.unsqueeze(-1) 
         cos_sim_max, _ = cos_sim.max(-1)
-        cos_sim_max = cos_sim_max.unsqueeze(-1) #[N, 1]
-
-        q_levels = torch.arange(self.level_num).float().cuda() #[s]
-        q_levels = q_levels.expand(N, self.level_num) #[N, s]
-
-
-        q_levels =  (2 * q_levels + 1) / (2 * self.level_num) * (cos_sim_max - cos_sim_min) + cos_sim_min #[N, s]
-        q_levels = q_levels.unsqueeze(1) #[N, 1, s] 
-        #q_levels_spatial = q_levels.expand(H*W, N, self.level_num).permute(1, 0, 2) #[N, HW, s]
-
-        q_levels_inter = q_levels[:, :, 1] - q_levels[:, :, 0] #[N, 1]
-        q_levels_inter = q_levels_inter.unsqueeze(-1) #[N, 1, 1]
-
-        cos_sim = cos_sim.unsqueeze(-1) #[N, HW, 1]
-
-
+        cos_sim_max = cos_sim_max.unsqueeze(-1)
+        q_levels = torch.arange(self.level_num).float().cuda() 
+        q_levels = q_levels.expand(N, self.level_num) 
+        q_levels =  (2 * q_levels + 1) / (2 * self.level_num) * (cos_sim_max - cos_sim_min) + cos_sim_min 
+        q_levels = q_levels.unsqueeze(1) 
+        q_levels_inter = q_levels[:, :, 1] - q_levels[:, :, 0] 
+        q_levels_inter = q_levels_inter.unsqueeze(-1) 
+        cos_sim = cos_sim.unsqueeze(-1) 
         quant = 1 - torch.abs(q_levels - cos_sim)
-        quant = quant * (quant > (1 - q_levels_inter)) #[N, HW, s]
-
-        sta = quant.sum(1) #[N, s]
-        sta = sta / (sta.sum(-1).unsqueeze(-1)) #[N, s]
-        sta = sta.unsqueeze(1) #[N, 1, s]
-
-        sta = torch.cat([q_levels, sta], dim=1) #[N, 2, s]
+        quant = quant * (quant > (1 - q_levels_inter))
+        sta = quant.sum(1) 
+        sta = sta / (sta.sum(-1).unsqueeze(-1))
+        sta = sta.unsqueeze(1)
+        sta = torch.cat([q_levels, sta], dim=1) 
         sta = self.f1(sta)
-        sta = self.f2(sta) #[N, C, S]
-        
-        x_ave = x_ave.squeeze(-1).squeeze(-1) #[N, C]
-        x_ave = x_ave.expand(self.level_num, N, C).permute(1, 2, 0) #[N, C, S]
-        
+        sta = self.f2(sta)     
+        x_ave = x_ave.squeeze(-1).squeeze(-1)
+        x_ave = x_ave.expand(self.level_num, N, C).permute(1, 2, 0)  
         sta = torch.cat([sta, x_ave], dim=1)
         sta = self.out(sta)
-
         return sta, quant
+
+
 
 class QCO_2d(nn.Module):
     def __init__(self, scale, level_num):
@@ -108,64 +98,49 @@ class QCO_2d(nn.Module):
         N, C, H, W = x.shape
         self.size_h = int(H / self.scale)
         self.size_w = int(W / self.scale)
-        x_ave = F.adaptive_avg_pool2d(x, (self.scale, self.scale)) #[N, C, s, s]
-        x_ave_up = F.adaptive_avg_pool2d(x_ave, (H, W)) #[N, C, H, W]
-        cos_sim = (F.normalize(x_ave_up, dim=1) * F.normalize(x, dim=1)).sum(1) #[N, H, W]
-        cos_sim = cos_sim.unsqueeze(1) #[N, 1, H, W]
-        #cos_sim = F.pad(cos_sim, (1, 1, 1, 1), mode='constant', value=0.) #[N, 1, H+1, W+1]
-        #cos_sim = torch.cat([cos_sim[:, :, 1:-1, 1:-1], cos_sim[:, :, 1:-1, 2:]], dim=1) #[N, 2, H, W]
-
+        x_ave = F.adaptive_avg_pool2d(x, (self.scale, self.scale)) 
+        x_ave_up = F.adaptive_avg_pool2d(x_ave, (H, W)) 
+        cos_sim = (F.normalize(x_ave_up, dim=1) * F.normalize(x, dim=1)).sum(1)
+        cos_sim = cos_sim.unsqueeze(1) 
         cos_sim = cos_sim.reshape(N, 1, self.scale, self.size_h, self.scale, self.size_w)
         cos_sim = cos_sim.permute(0, 1, 2, 4, 3, 5)
         cos_sim = cos_sim.reshape(N, 1, int(self.scale*self.scale), int(self.size_h*self.size_w)) #[N, 2, s*s, h*w]
-        cos_sim = cos_sim.permute(0, 1, 3, 2) #[N, 1, h*w, s*s]
-        cos_sim = cos_sim.squeeze(1) #[N, h*w, s*s]
-
-        cos_sim_min, _ = cos_sim.min(1) #[N, s*s]
-        cos_sim_min = cos_sim_min.unsqueeze(-1) #[N, s*s, 1]
-        cos_sim_max, _ = cos_sim.max(1) #[N, s*s]
-        cos_sim_max = cos_sim_max.unsqueeze(-1) #[N, s*s, 1]
-
-        q_levels = torch.arange(self.level_num).float().cuda() #[l]
-        q_levels = q_levels.expand(N, self.scale*self.scale, self.level_num) #[N, s*s, l]
-        q_levels =  (2 * q_levels + 1) / (2 * self.level_num) * (cos_sim_max - cos_sim_min) + cos_sim_min #[N, s*s, l]
-        q_levels_inter = q_levels[:, :, 1] - q_levels[:, :, 0] #[N, s*s]
-        q_levels_inter = q_levels_inter.unsqueeze(1).unsqueeze(-1) #[N, 1, s*s, 1]
-
-        cos_sim = cos_sim.unsqueeze(-1) #[N, h*w, s*s, 1]
-        q_levels = q_levels.unsqueeze(1)#[N, 1, s*s, l]
-
-        quant = 1 - torch.abs(q_levels - cos_sim) #[N, h*w, s*s, l]
-        quant = quant * (quant > (1 - q_levels_inter)) #[N, h*w, s*s, l]
-
-        quant = quant.view([N, self.size_h, self.size_w, self.scale*self.scale, self.level_num]) #[N, h, w, s*s, l]
-        quant = quant.permute(0, -2, -1, 1, 2) #[N, s*s, l, h, w]
-
-
+        cos_sim = cos_sim.permute(0, 1, 3, 2) 
+        cos_sim = cos_sim.squeeze(1) 
+        cos_sim_min, _ = cos_sim.min(1)
+        cos_sim_min = cos_sim_min.unsqueeze(-1) 
+        cos_sim_max, _ = cos_sim.max(1) 
+        cos_sim_max = cos_sim_max.unsqueeze(-1) 
+        q_levels = torch.arange(self.level_num).float().cuda() 
+        q_levels = q_levels.expand(N, self.scale*self.scale, self.level_num) 
+        q_levels =  (2 * q_levels + 1) / (2 * self.level_num) * (cos_sim_max - cos_sim_min) + cos_sim_min 
+        q_levels_inter = q_levels[:, :, 1] - q_levels[:, :, 0] 
+        q_levels_inter = q_levels_inter.unsqueeze(1).unsqueeze(-1) 
+        cos_sim = cos_sim.unsqueeze(-1) 
+        q_levels = q_levels.unsqueeze(1)
+        quant = 1 - torch.abs(q_levels - cos_sim) 
+        quant = quant * (quant > (1 - q_levels_inter)) 
+        quant = quant.view([N, self.size_h, self.size_w, self.scale*self.scale, self.level_num]) 
+        quant = quant.permute(0, -2, -1, 1, 2) 
         quant = F.pad(quant, (0, 1, 0, 1), mode='constant', value=0.)
-        quant_left = quant[:, :, :, :self.size_h, :self.size_w].unsqueeze(3) #[N, s*s, l, 1, h, w]
-        quant_right = quant[:, :, :, 1:, 1:].unsqueeze(2) #[N, s*s, 1, l, h, w]
-        quant = quant_left * quant_right #[N, s*s, l, l, h, w]
-
-        sta = quant.sum(-1).sum(-1) #[N, s*s, l, l]
-        sta = sta / (sta.sum(-1).sum(-1).unsqueeze(-1).unsqueeze(-1)) #[N, s*s, l, l]
-        sta = sta.unsqueeze(1) #[N, 1, s*s, l, l]
-        
+        quant_left = quant[:, :, :, :self.size_h, :self.size_w].unsqueeze(3)
+        quant_right = quant[:, :, :, 1:, 1:].unsqueeze(2) 
+        quant = quant_left * quant_right 
+        sta = quant.sum(-1).sum(-1) 
+        sta = sta / (sta.sum(-1).sum(-1).unsqueeze(-1).unsqueeze(-1)) 
+        sta = sta.unsqueeze(1) 
         q_levels = q_levels.expand(self.level_num, N, 1, self.scale*self.scale, self.level_num)
-        q_levels_h = q_levels.permute(1, 2, 3, 0, 4) #[N, 1, s*s, l, l]
-        q_levels_w = q_levels_h.permute(0, 1, 2, 4, 3) #[N, 1, s*s, l, l]
-        sta = torch.cat([q_levels_h, q_levels_w, sta], dim=1) #[N, 3, s*s, l, l]
-        sta = sta.view(N, 3, self.scale * self.scale, -1) #[N, 3, s*s, l*l]
-        
+        q_levels_h = q_levels.permute(1, 2, 3, 0, 4) 
+        q_levels_w = q_levels_h.permute(0, 1, 2, 4, 3) 
+        sta = torch.cat([q_levels_h, q_levels_w, sta], dim=1) 
+        sta = sta.view(N, 3, self.scale * self.scale, -1) 
         sta = self.f1(sta)
-        sta = self.f2(sta) #[N, C, s*s, l*l]
-
-        x_ave = x_ave.view(N, C, -1) #[N, C, s*s]
+        sta = self.f2(sta)
+        x_ave = x_ave.view(N, C, -1)
         x_ave = x_ave.expand(self.level_num*self.level_num, N, C, self.scale*self.scale)
-        x_ave = x_ave.permute(1, 2, 3, 0) #[N, C, s*s, l*l]
-
+        x_ave = x_ave.permute(1, 2, 3, 0) 
         sta = torch.cat([x_ave, sta], dim=1)
-        sta = self.out(sta) #[N, C, s*s, l*l]
+        sta = self.out(sta) 
         sta = sta.mean(-1)
         sta = sta.view(N, -1, self.scale, self.scale)
         return sta
@@ -181,23 +156,24 @@ class TEM(nn.Module):
         self.q = ConvBNReLU(128, 128, 1, 1, 0, has_bn=False, has_relu=False, mode='1d')
         self.v = ConvBNReLU(128, 128, 1, 1, 0, has_bn=False, has_relu=False, mode='1d')
         self.out = ConvBNReLU(128, 256, 1, 1, 0, mode='1d')
-    def forward(self, x): #quant [N, HW, S]
+    def forward(self, x): 
         N, C, H, W = x.shape
-        sta, quant = self.qco(x) #sta [N, C, S]  quant [N, HW, S]
-        k = self.k(sta) #[N, C, S]
-        q = self.q(sta) #[N, C, S]
-        v = self.v(sta) #[N, C, S]
-        k = k.permute(0, 2, 1) #[N, S, C]
-        w = torch.bmm(k, q) #[N, S, S]
-        w = F.softmax(w, dim=-1) #[N, S, S]
-        v = v.permute(0, 2, 1) #[N, S, C]
-        f = torch.bmm(w, v) #[N, S, C]
-        f = f.permute(0, 2, 1) #[N, C, S]
-        f = self.out(f) #[N, C, S]
-        quant = quant.permute(0, 2, 1) #[N, S, HW]
-        out = torch.bmm(f, quant) #[N, C, HW]
+        sta, quant = self.qco(x) 
+        k = self.k(sta) 
+        q = self.q(sta)
+        v = self.v(sta) 
+        k = k.permute(0, 2, 1) 
+        w = torch.bmm(k, q) 
+        w = F.softmax(w, dim=-1) 
+        v = v.permute(0, 2, 1) 
+        f = torch.bmm(w, v) 
+        f = f.permute(0, 2, 1) 
+        f = self.out(f) 
+        quant = quant.permute(0, 2, 1) 
+        out = torch.bmm(f, quant)
         out = out.view(N, 256, H, W)
         return out
+
 
 
 class PTFEM(nn.Module):
@@ -212,26 +188,23 @@ class PTFEM(nn.Module):
     def forward(self, x):
         H, W = x.shape[2:]
         x = self.conv(x)
-        sta_1 = self.qco_1(x) #[N, C, s*s, l*l]
+        sta_1 = self.qco_1(x) 
         sta_2 = self.qco_2(x)
         sta_3 = self.qco_3(x)
-        sta_6 = self.qco_6(x)
-        
+        sta_6 = self.qco_6(x) 
         N, C = sta_1.shape[:2]
-
         sta_1 = sta_1.view(N, C, 1, 1)
         sta_2 = sta_2.view(N, C, 2, 2)
         sta_3 = sta_3.view(N, C, 3, 3)
         sta_6 = sta_6.view(N, C, 6, 6)
-
         sta_1 = F.interpolate(sta_1, size=(H, W), mode='bilinear', align_corners=True)
         sta_2 = F.interpolate(sta_2, size=(H, W), mode='bilinear', align_corners=True)
         sta_3 = F.interpolate(sta_3, size=(H, W), mode='bilinear', align_corners=True)
         sta_6 = F.interpolate(sta_6, size=(H, W), mode='bilinear', align_corners=True)
-
-        x = torch.cat([sta_1, sta_2, sta_3, sta_6], dim=1) #512
+        x = torch.cat([sta_1, sta_2, sta_3, sta_6], dim=1) 
         x = self.out(x)
         return x
+
 
 
 class STL(nn.Module):
@@ -243,8 +216,8 @@ class STL(nn.Module):
     def forward(self, x):
         x = self.conv_start(x)
         x_tem = self.tem(x)
-        x = torch.cat([x_tem, x], dim=1) #c = 256 + 256 = 512
-        x_ptfem = self.ptfem(x) # 256   
+        x = torch.cat([x_tem, x], dim=1) 
+        x_ptfem = self.ptfem(x)  
         x = torch.cat([x_ptfem, x], dim=1)
         return x
 
