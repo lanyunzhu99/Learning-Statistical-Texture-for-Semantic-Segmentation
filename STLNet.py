@@ -48,7 +48,6 @@ class QCO_1d(nn.Module):
         self.f2 = ConvBNReLU(64, 128, 1, 1, 0, has_bn=False, mode='1d')
         self.out = ConvBNReLU(256, 128, 1, 1, 0, has_bn=True, mode='1d')
         self.level_num = level_num
-
     def forward(self, x):
         x = self.conv1(x)
         x = self.conv2(x)
@@ -59,7 +58,7 @@ class QCO_1d(nn.Module):
         cos_sim_min, _ = cos_sim.min(-1) 
         cos_sim_min = cos_sim_min.unsqueeze(-1) 
         cos_sim_max, _ = cos_sim.max(-1)
-        cos_sim_max = cos_sim_max.unsqueeze(-1)
+        cos_sim_max = cos_sim_max.unsqueeze(-1) 
         q_levels = torch.arange(self.level_num).float().cuda() 
         q_levels = q_levels.expand(N, self.level_num) 
         q_levels =  (2 * q_levels + 1) / (2 * self.level_num) * (cos_sim_max - cos_sim_min) + cos_sim_min 
@@ -68,15 +67,15 @@ class QCO_1d(nn.Module):
         q_levels_inter = q_levels_inter.unsqueeze(-1) 
         cos_sim = cos_sim.unsqueeze(-1) 
         quant = 1 - torch.abs(q_levels - cos_sim)
-        quant = quant * (quant > (1 - q_levels_inter))
+        quant = quant * (quant > (1 - q_levels_inter)) 
         sta = quant.sum(1) 
-        sta = sta / (sta.sum(-1).unsqueeze(-1))
-        sta = sta.unsqueeze(1)
+        sta = sta / (sta.sum(-1).unsqueeze(-1)) 
+        sta = sta.unsqueeze(1) 
         sta = torch.cat([q_levels, sta], dim=1) 
         sta = self.f1(sta)
-        sta = self.f2(sta)     
-        x_ave = x_ave.squeeze(-1).squeeze(-1)
-        x_ave = x_ave.expand(self.level_num, N, C).permute(1, 2, 0)  
+        sta = self.f2(sta) 
+        x_ave = x_ave.squeeze(-1).squeeze(-1) 
+        x_ave = x_ave.expand(self.level_num, N, C).permute(1, 2, 0) 
         sta = torch.cat([sta, x_ave], dim=1)
         sta = self.out(sta)
         return sta, quant
@@ -100,14 +99,14 @@ class QCO_2d(nn.Module):
         self.size_w = int(W / self.scale)
         x_ave = F.adaptive_avg_pool2d(x, (self.scale, self.scale)) 
         x_ave_up = F.adaptive_avg_pool2d(x_ave, (H, W)) 
-        cos_sim = (F.normalize(x_ave_up, dim=1) * F.normalize(x, dim=1)).sum(1)
+        cos_sim = (F.normalize(x_ave_up, dim=1) * F.normalize(x, dim=1)).sum(1) 
         cos_sim = cos_sim.unsqueeze(1) 
         cos_sim = cos_sim.reshape(N, 1, self.scale, self.size_h, self.scale, self.size_w)
         cos_sim = cos_sim.permute(0, 1, 2, 4, 3, 5)
-        cos_sim = cos_sim.reshape(N, 1, int(self.scale*self.scale), int(self.size_h*self.size_w)) #[N, 2, s*s, h*w]
+        cos_sim = cos_sim.reshape(N, 1, int(self.scale*self.scale), int(self.size_h*self.size_w)) 
         cos_sim = cos_sim.permute(0, 1, 3, 2) 
         cos_sim = cos_sim.squeeze(1) 
-        cos_sim_min, _ = cos_sim.min(1)
+        cos_sim_min, _ = cos_sim.min(1) 
         cos_sim_min = cos_sim_min.unsqueeze(-1) 
         cos_sim_max, _ = cos_sim.max(1) 
         cos_sim_max = cos_sim_max.unsqueeze(-1) 
@@ -122,12 +121,14 @@ class QCO_2d(nn.Module):
         quant = quant * (quant > (1 - q_levels_inter)) 
         quant = quant.view([N, self.size_h, self.size_w, self.scale*self.scale, self.level_num]) 
         quant = quant.permute(0, -2, -1, 1, 2) 
+        quant = quant.view(N, -1, self.size_h, self.size_w)
         quant = F.pad(quant, (0, 1, 0, 1), mode='constant', value=0.)
-        quant_left = quant[:, :, :, :self.size_h, :self.size_w].unsqueeze(3)
+        quant = quant.view(N, self.scale*self.scale, self.level_num, self.size_h+1, self.size_w+1)
+        quant_left = quant[:, :, :, :self.size_h, :self.size_w].unsqueeze(3) 
         quant_right = quant[:, :, :, 1:, 1:].unsqueeze(2) 
         quant = quant_left * quant_right 
         sta = quant.sum(-1).sum(-1) 
-        sta = sta / (sta.sum(-1).sum(-1).unsqueeze(-1).unsqueeze(-1)) 
+        sta = sta / (sta.sum(-1).sum(-1).unsqueeze(-1).unsqueeze(-1) + 1e-6) 
         sta = sta.unsqueeze(1) 
         q_levels = q_levels.expand(self.level_num, N, 1, self.scale*self.scale, self.level_num)
         q_levels_h = q_levels.permute(1, 2, 3, 0, 4) 
@@ -135,14 +136,14 @@ class QCO_2d(nn.Module):
         sta = torch.cat([q_levels_h, q_levels_w, sta], dim=1) 
         sta = sta.view(N, 3, self.scale * self.scale, -1) 
         sta = self.f1(sta)
-        sta = self.f2(sta)
-        x_ave = x_ave.view(N, C, -1)
+        sta = self.f2(sta) 
+        x_ave = x_ave.view(N, C, -1) 
         x_ave = x_ave.expand(self.level_num*self.level_num, N, C, self.scale*self.scale)
         x_ave = x_ave.permute(1, 2, 3, 0) 
         sta = torch.cat([x_ave, sta], dim=1)
         sta = self.out(sta) 
         sta = sta.mean(-1)
-        sta = sta.view(N, -1, self.scale, self.scale)
+        sta = sta.view(N, sta.shape[1], self.scale, self.scale)
         return sta
 
 
@@ -156,11 +157,11 @@ class TEM(nn.Module):
         self.q = ConvBNReLU(128, 128, 1, 1, 0, has_bn=False, has_relu=False, mode='1d')
         self.v = ConvBNReLU(128, 128, 1, 1, 0, has_bn=False, has_relu=False, mode='1d')
         self.out = ConvBNReLU(128, 256, 1, 1, 0, mode='1d')
-    def forward(self, x): 
+    def forward(self, x):
         N, C, H, W = x.shape
         sta, quant = self.qco(x) 
-        k = self.k(sta) 
-        q = self.q(sta)
+        k = self.k(sta)
+        q = self.q(sta) 
         v = self.v(sta) 
         k = k.permute(0, 2, 1) 
         w = torch.bmm(k, q) 
@@ -170,7 +171,7 @@ class TEM(nn.Module):
         f = f.permute(0, 2, 1) 
         f = self.out(f) 
         quant = quant.permute(0, 2, 1) 
-        out = torch.bmm(f, quant)
+        out = torch.bmm(f, quant) 
         out = out.view(N, 256, H, W)
         return out
 
@@ -191,7 +192,7 @@ class PTFEM(nn.Module):
         sta_1 = self.qco_1(x) 
         sta_2 = self.qco_2(x)
         sta_3 = self.qco_3(x)
-        sta_6 = self.qco_6(x) 
+        sta_6 = self.qco_6(x)   
         N, C = sta_1.shape[:2]
         sta_1 = sta_1.view(N, C, 1, 1)
         sta_2 = sta_2.view(N, C, 2, 2)
@@ -216,10 +217,7 @@ class STL(nn.Module):
     def forward(self, x):
         x = self.conv_start(x)
         x_tem = self.tem(x)
-        x = torch.cat([x_tem, x], dim=1) 
-        x_ptfem = self.ptfem(x)  
+        x = torch.cat([x_tem, x], dim=1) #c = 256 + 256 = 512
+        x_ptfem = self.ptfem(x) # 256   
         x = torch.cat([x_ptfem, x], dim=1)
         return x
-
-
-
